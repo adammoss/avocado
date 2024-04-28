@@ -2,9 +2,12 @@ import numpy as np
 import os
 import pandas as pd
 from tqdm import tqdm
+import torch
+from torch.nn import functional as F
 
 from .settings import settings
 from .utils import logger, AvocadoException
+from .net import FTTransformer, SimpleMLP
 
 
 def get_classifier_path(name):
@@ -568,6 +571,324 @@ def fit_lightgbm_classifier(
     classifier.fit(train_features, train_classes, **fit_params)
 
     return classifier
+
+
+class NNClassifier(Classifier):
+    """Feature based classifier using a neural network to classify objects.
+
+    This uses a weighted multi-class logarithmic loss that normalizes for the
+    total counts of each class. This classifier is optimized for the metric
+    used in the PLAsTiCC Kaggle challenge.
+
+    Parameters
+    ----------
+    featurizer : :class:`Featurizer`
+        The featurizer to use to select features for classification.
+    class_weights : dict (optional)
+        Weights to use for each class. If not set, equal weights are assumed
+        for each class.
+    weighting_function : function (optional)
+        Function to use to evaluate weights. By default,
+        `evaluate_weights_flat` is used which normalizes the weights for each
+        class so that their overall weight matches the one set by
+        class_weights. Within each class, `evaluate_weights_flat` gives all
+        objects equal weights. Any weights function can be used here as long as
+        it has the same signature as `evaluate_weights_flat`.
+    """
+
+    def __init__(
+        self,
+        name,
+        featurizer,
+        class_weights=None,
+        weighting_function=evaluate_weights_flat,
+        class_map=None,
+        model_type='mlp',
+    ):
+        super().__init__(name)
+
+        self.featurizer = featurizer
+        self.class_weights = class_weights
+        self.weighting_function = weighting_function
+        self.class_map = class_map
+        self.model_type = model_type
+
+        if torch.cuda.is_available():
+            self.device = 'cuda'
+        elif torch.backends.mps.is_available():
+            self.device = 'mps'
+        else:
+            self.device = 'cpu'
+
+    def train(self, dataset, num_folds=None, random_state=None, **kwargs):
+        """Train the classifier on a dataset
+
+        Parameters
+        ----------
+        dataset : :class:`Dataset`
+            The dataset to use for training.
+        num_folds : int (optional)
+            The number of folds to use. Default: settings['num_folds']
+        random_state : int (optional)
+            The random number initializer to use for splitting the folds.
+            Default: settings['fold_random_state']
+        **kwargs
+            Additional parameters to pass to the LightGBM classifier.
+        """
+        features = dataset.select_features(self.featurizer)
+
+        # Label the folds
+        folds = dataset.label_folds(num_folds, random_state)
+        num_folds = np.max(folds) + 1
+
+        object_weights = self.weighting_function(dataset, self.class_weights)
+        object_classes = dataset.metadata["class"]
+        classes = np.unique(object_classes)
+
+        predictions = pd.DataFrame(
+            -1 * np.ones((len(object_classes), len(classes))),
+            index=dataset.metadata.index,
+            columns=classes,
+        )
+
+        classifiers = []
+
+        for fold in range(num_folds):
+            print("Training fold %d." % fold)
+            train_mask = folds != fold
+            validation_mask = folds == fold
+
+            train_features = features[train_mask]
+            train_classes = object_classes[train_mask]
+            train_weights = object_weights[train_mask]
+
+            validation_features = features[validation_mask]
+            validation_classes = object_classes[validation_mask]
+            validation_weights = object_weights[validation_mask]
+
+            if self.class_map is not None:
+                train_classes = train_classes.map(self.class_map)
+                validation_classes = validation_classes.map(self.class_map)
+
+            classifier = fit_nn_classifier(
+                train_features,
+                train_classes,
+                train_weights,
+                validation_features,
+                validation_classes,
+                validation_weights,
+                model_type=self.model_type,
+                device=self.device,
+                **kwargs
+            )
+
+            # TODO: Need to loop over these
+            x = torch.nan_to_num(torch.tensor(validation_features.values[0:16], dtype=torch.float32)).to(self.device)
+            validation_predictions = classifier(None, x)
+
+            predictions[validation_mask] = validation_predictions.cpu().detach().numpy()
+
+            classifiers.append(classifier)
+
+        # Statistics on out-of-sample predictions
+        total_logloss = weighted_multi_logloss(
+            object_classes,
+            predictions,
+            object_weights=object_weights,
+            class_weights=self.class_weights,
+        )
+        unweighted_total_logloss = weighted_multi_logloss(
+            object_classes, predictions, class_weights=self.class_weights
+        )
+        print("Weighted log-loss:")
+        print("    With object weights:    %.5f" % total_logloss)
+        print("    Without object weights: %.5f" % unweighted_total_logloss)
+
+        # Original sample only (no augments)
+        if "reference_object_id" in dataset.metadata:
+            original_mask = dataset.metadata["reference_object_id"].isnull()
+            original_logloss = weighted_multi_logloss(
+                object_classes[original_mask],
+                predictions[original_mask],
+                object_weights=object_weights[original_mask],
+                class_weights=self.class_weights,
+            )
+            unweighted_original_logloss = weighted_multi_logloss(
+                object_classes[original_mask],
+                predictions[original_mask],
+                class_weights=self.class_weights,
+            )
+            print("Original un-augmented dataset weighted log-loss:")
+            print("    With object weights:    %.5f" % original_logloss)
+            print("    Without object weights: %.5f" % unweighted_original_logloss)
+
+        self.train_predictions = predictions
+        self.train_classes = object_classes
+        self.classifiers = classifiers
+
+        return classifiers
+
+    def predict(self, dataset):
+        """Generate predictions for a dataset
+
+        Parameters
+        ----------
+        dataset : :class:`Dataset`
+            The dataset to generate predictions for.
+
+        Returns
+        -------
+        predictions : :class:`pandas.DataFrame`
+            A pandas Series with the predictions for each class.
+        """
+        features = dataset.select_features(self.featurizer)
+
+        predictions = 0
+
+        for classifier in tqdm(self.classifiers, desc="Classifier", dynamic_ncols=True):
+            fold_scores = classifier.predict_proba(
+                features, raw_score=True, num_iteration=classifier.best_iteration_
+            )
+
+            exp_scores = np.exp(fold_scores)
+
+            fold_predictions = exp_scores / np.sum(exp_scores, axis=1)[:, None]
+            predictions += fold_predictions
+
+        predictions /= len(self.classifiers)
+
+        predictions = pd.DataFrame(
+            predictions, index=features.index, columns=self.train_predictions.columns
+        )
+
+        return predictions
+
+
+def fit_nn_classifier(
+    train_features,
+    train_classes,
+    train_weights,
+    validation_features,
+    validation_classes,
+    validation_weights,
+    device='cpu',
+    **kwargs
+):
+    """Fit a neural network classifier
+
+    Parameters
+    ----------
+    train_features : `pandas.DataFrame`
+        The features of the training objects.
+    train_classes : `pandas.Series`
+        The classes of the training objects.
+    train_weights : `pandas.Series`
+        The weights of the training objects.
+    validation_features : `pandas.DataFrame`
+        The features of the validation objects.
+    validation_classes : `pandas.Series`
+        The classes of the validation objects.
+    validation_weights : `pandas.Series`
+        The weights of the validation objects.
+    **kwargs
+        Additional parameters to pass to the classifier.
+
+    Returns
+    -------
+    classifier : `net`
+        The fitted classifier
+    """
+
+    def get_batch(split, batch_size=32):
+        if split == 'train':
+            data = train_features
+            labels = train_classes
+        elif split == 'val':
+            data = validation_features
+            labels = validation_classes
+        ix = np.random.randint(0, len(data), (batch_size,))
+        x = torch.nan_to_num(torch.tensor(data.iloc[ix, :].values, dtype=torch.float32))
+        y = torch.tensor(labels.iloc[ix], dtype=torch.long)
+        return x.to(device), y.to(device)
+
+    net_params = {
+        "categories": (),
+        "num_continuous": train_features.shape[1],
+        "dim": 16,
+        "dim_out": len(np.unique(train_classes)),
+        "depth": 6,
+        "heads": 8,
+        "attn_dropout": 0.1,
+        "ff_dropout": 0.1,
+    }
+    net_params.update(kwargs)
+
+    fit_params = {
+        'log': False,
+        'max_iters': 1000,
+        'eval_iters': 100,
+        'eval_interval': 100,
+        'lr': 1e-4,
+        'model_type': 'fttrans',
+    }
+    fit_params.update(kwargs)
+
+    if fit_params['model_type'] == 'fttrans':
+        classifier = FTTransformer(**net_params)
+    elif fit_params['model_type'] == 'mlp':
+        classifier = SimpleMLP(dim=train_features.shape[1], dim_out=len(np.unique(train_classes)))
+
+    classifier = classifier.to(device)
+
+    model_parameters = filter(lambda p: p.requires_grad, classifier.parameters())
+    params = sum([np.prod(p.size()) for p in model_parameters])
+    print(f'Model parameters: {params:,}')
+
+    @torch.no_grad()
+    def estimate_loss(eval_iters):
+        out = {}
+        classifier.eval()
+        splits = ['train', 'val']
+        for split in splits:
+            losses = torch.zeros(eval_iters)
+            correct = 0
+            total = 0
+            for k in range(eval_iters):
+                x, y = get_batch(split, batch_size=32)
+                logits = classifier(None, x)
+                loss = F.cross_entropy(logits, y)
+                losses[k] = loss.item()
+                correct += torch.sum(y == torch.argmax(logits, dim=-1))
+                total += len(x)
+            out['%s/loss' % split] = losses.mean()
+            out['%s/accuracy' % split] = (correct / total).item()
+        classifier.train()
+        return out
+
+    optimizer = torch.optim.AdamW(classifier.parameters(), lr=fit_params['lr'])
+    classifier.train()
+    if fit_params['log']:
+        run = wandb.init(
+            project='avocado',
+            config={**net_params},
+        )
+    for iter in range(fit_params['max_iters']):
+        optimizer.zero_grad()
+        x, y = get_batch('train', batch_size=32)
+        logits = classifier(None, x)
+        loss = F.cross_entropy(logits, y)
+        loss.backward()
+        optimizer.step()
+        if iter % fit_params['eval_interval'] == 0 or iter == fit_params['max_iters'] - 1:
+            metrics = estimate_loss(fit_params['eval_iters'])
+            if fit_params['log']:
+                wandb.log(metrics)
+            print(
+                f"step {iter}/{fit_params['max_iters']}: train loss {metrics['train/loss']:.4f}, "
+                f"train accuracy {metrics['train/accuracy']:.4f}, val loss {metrics['val/loss']:.4f}, "
+                f"val accuracy {metrics['val/accuracy']:.4f}")
+    return classifier
+
 
 
 def weighted_multi_logloss(

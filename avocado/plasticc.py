@@ -4,12 +4,16 @@ import numpy as np
 import os
 import pandas as pd
 from scipy.special import erf
+import time
 
 from .augment import Augmentor
 from .dataset import Dataset
 from .features import Featurizer
 from .settings import settings
 from .utils import AvocadoException, logger
+
+import warnings
+np.warnings = warnings
 
 
 # PLAsTiCC specific parameters
@@ -51,6 +55,23 @@ plasticc_flat_weights = {
     92: 1,
     95: 1,
     99: 0,
+}
+plasticc_class_map = {
+    6: 0,
+    15: 1,
+    16: 2,
+    42: 3,
+    52: 4,
+    53: 5,
+    62: 6,
+    64: 7,
+    65: 8,
+    67: 9,
+    88: 10,
+    90: 11,
+    92: 12,
+    95: 13,
+    99: 14,
 }
 
 

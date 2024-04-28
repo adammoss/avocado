@@ -21,6 +21,12 @@ if __name__ == "__main__":
         help='Name of the classifier to produce.'
     )
     parser.add_argument(
+        '--classifier_type',
+        help='Kind of classifier to use. (default: %(default)s)',
+        default='lgbm',
+        choices=('lgbm', 'fttrans', 'mlp'),
+    )
+    parser.add_argument(
         '--class_weighting',
         help='Kind of per-class weighting to use. (default: %(default)s)',
         default='flat',
@@ -67,6 +73,8 @@ if __name__ == "__main__":
         raise avocado.AvocadoException("Invalid object weighting '%s'!" %
                                        args.weighting)
 
+    class_map = avocado.plasticc.plasticc_class_map
+
     # Simulation of bias for the PLAsTiCC dataset.
     # TODO: generalize this to more than just PLAsTiCC
     if args.simulate_plasticc_bias is not None:
@@ -102,12 +110,23 @@ if __name__ == "__main__":
 
     # Train the classifier
     print("Training classifier '%s'..." % args.classifier)
-    classifier = avocado.LightGBMClassifier(
-        args.classifier,
-        avocado.plasticc.PlasticcFeaturizer(),
-        class_weights=class_weights,
-        weighting_function=weighting_function,
-    )
+    if args.classifier_type == 'lgbm':
+        classifier = avocado.LightGBMClassifier(
+            args.classifier,
+            avocado.plasticc.PlasticcFeaturizer(),
+            class_weights=class_weights,
+            weighting_function=weighting_function,
+        )
+    else:
+        classifier = avocado.NNClassifier(
+            args.classifier,
+            avocado.plasticc.PlasticcFeaturizer(),
+            class_weights=class_weights,
+            weighting_function=weighting_function,
+            class_map=class_map,
+            model_type=args.classifier_type
+        )
+
     classifier.train(dataset)
 
     # Save the classifier

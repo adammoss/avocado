@@ -1,11 +1,13 @@
 astropy
 george
-lightgbm
+lightgbm==3.3.5
 matplotlib
 numpy
 pandas
 requests
 scikit-learn
 scipy>=1.1.0
-tables
+tables==3.8.0
 tqdm
+torch
+einops

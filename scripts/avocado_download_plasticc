@@ -7,6 +7,7 @@ easily. We also update header keywords to match the avocado naming convention.
 import os
 import pandas as pd
 from tqdm import tqdm
+import argparse
 
 import avocado
 
@@ -104,6 +105,14 @@ def preprocess_observations(input_path, output_path, chunk_size=10**6):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--num_test_files',
+        type=int,
+        default=11,
+    )
+    args = parser.parse_args()
+
     basedir = avocado.settings['data_directory']
     rawdir = os.path.join(basedir, 'plasticc_raw')
 
@@ -127,6 +136,14 @@ if __name__ == "__main__":
     raw_test_metadata_path = os.path.join(
         rawdir, 'plasticc_test_metadata.csv.gz')
     test_metadata = pd.read_csv(raw_test_metadata_path)
+    test_observations = []
+    for test_idx in range(1, args.num_test_files + 1):
+        raw_test_observations_path = os.path.join(
+            rawdir, 'plasticc_test_lightcurves_%02d.csv.gz' % test_idx)
+        test_observations.append(pd.read_csv(raw_test_observations_path))
+    test_observations = pd.concat(test_observations)
+    test_metadata = test_metadata[test_metadata["object_id"].isin(test_observations["object_id"].values)]
+
     test_metadata = update_plasticc_metadata(test_metadata)
     avocado.utils.write_dataframe(test_path, test_metadata, 'metadata',
                                   overwrite=True)
@@ -137,7 +154,7 @@ if __name__ == "__main__":
     preprocess_observations(raw_train_observations_path, train_path)
 
     print("Preprocessing test observations...")
-    for test_idx in range(1, 12):
+    for test_idx in range(1, args.num_test_files + 1):
         raw_test_observations_path = os.path.join(
             rawdir, 'plasticc_test_lightcurves_%02d.csv.gz' % test_idx)
         preprocess_observations(raw_test_observations_path, test_path)
