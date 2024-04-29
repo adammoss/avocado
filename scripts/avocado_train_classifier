@@ -24,7 +24,7 @@ if __name__ == "__main__":
         '--classifier_type',
         help='Kind of classifier to use. (default: %(default)s)',
         default='lgbm',
-        choices=('lgbm', 'fttrans', 'mlp'),
+        choices=('lgbm', 'ft', 'mlp'),
     )
     parser.add_argument(
         '--class_weighting',
@@ -43,6 +43,24 @@ if __name__ == "__main__":
         help='Simulate adding a bias for the PLAsTiCC dataset.',
         default=None,
         choices=(None, 'low_redshift', 'high_redshift'),
+    )
+    parser.add_argument(
+        '--batch_size',
+        help='Batch size to use. (default: %(default)s)',
+        default=32,
+        type=int,
+    )
+    parser.add_argument(
+        '--max_iters',
+        help='Max iters to use. (default: %(default)s)',
+        default=10000,
+        type=int,
+    )
+    parser.add_argument(
+        '--dim',
+        help='Dim to use. (default: %(default)s)',
+        default=16,
+        type=int,
     )
 
     args = parser.parse_args()
@@ -124,7 +142,10 @@ if __name__ == "__main__":
             class_weights=class_weights,
             weighting_function=weighting_function,
             class_map=class_map,
-            model_type=args.classifier_type
+            model_type=args.classifier_type,
+            batch_size=args.batch_size,
+            max_iters=args.max_iters,
+            dim=args.dim,
         )
 
     classifier.train(dataset)

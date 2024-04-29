@@ -606,6 +606,9 @@ class NNClassifier(Classifier):
         weighting_function=evaluate_weights_flat,
         class_map=None,
         model_type='mlp',
+        batch_size=32,
+        max_iters=10000,
+        dim=16,
     ):
         super().__init__(name)
 
@@ -614,6 +617,9 @@ class NNClassifier(Classifier):
         self.weighting_function = weighting_function
         self.class_map = class_map
         self.model_type = model_type
+        self.batch_size = batch_size
+        self.max_iters = max_iters
+        self.dim = dim
 
         if torch.cuda.is_available():
             self.device = 'cuda'
@@ -680,10 +686,15 @@ class NNClassifier(Classifier):
                 validation_weights,
                 model_type=self.model_type,
                 device=self.device,
+                batch_size=self.batch_size,
+                fold=fold,
+                max_iters=self.max_iters,
+                dim=self.dim,
                 **kwargs
             )
 
             validation_predictions = []
+            classifier.eval()
             for validation_feature in validation_features.values:
                 x = torch.nan_to_num(torch.tensor(validation_feature, dtype=torch.float32)).to(self.device)
                 logits = classifier(None, x.unsqueeze(0)).cpu().detach().numpy()
@@ -805,6 +816,10 @@ def fit_nn_classifier(
     validation_classes,
     validation_weights,
     device='cpu',
+    batch_size=32,
+    max_iters=10000,
+    fold=1,
+    dim=16,
     **kwargs
 ):
     """Fit a neural network classifier
@@ -850,7 +865,7 @@ def fit_nn_classifier(
     net_params = {
         "categories": (),
         "num_continuous": train_features.shape[1],
-        "dim": 16,
+        "dim": dim,
         "dim_out": len(np.unique(train_classes)),
         "depth": 6,
         "heads": 8,
@@ -860,16 +875,17 @@ def fit_nn_classifier(
     net_params.update(kwargs)
 
     fit_params = {
-        'log': False,
-        'max_iters': 5000,
-        'eval_iters': 100,
-        'eval_interval': 100,
+        'log': True,
+        'max_iters': max_iters,
+        'eval_iters': 200,
+        'eval_interval': 200,
         'lr': 1e-4,
-        'model_type': 'fttrans',
+        'model_type': 'ft',
+        'batch_size': batch_size,
     }
     fit_params.update(kwargs)
 
-    if fit_params['model_type'] == 'fttrans':
+    if fit_params['model_type'] == 'ft':
         classifier = FTTransformer(**net_params)
     elif fit_params['model_type'] == 'mlp':
         classifier = SimpleMLP(dim=train_features.shape[1], dim_out=len(np.unique(train_classes)))
@@ -890,7 +906,7 @@ def fit_nn_classifier(
             correct = 0
             total = 0
             for k in range(eval_iters):
-                x, y, w = get_batch(split, 32)
+                x, y, w = get_batch(split, batch_size=fit_params['batch_size'])
                 logits = classifier(None, x)
                 loss = F.cross_entropy(logits, y, reduction="none")
                 loss = torch.mean(loss * w)
@@ -909,10 +925,12 @@ def fit_nn_classifier(
         run = wandb.init(
             project='avocado',
             config={**net_params},
+            group='fold_%s' % fold,
+            reinit=True,
         )
     for iter in range(fit_params['max_iters']):
         optimizer.zero_grad()
-        x, y, w = get_batch('train', batch_size=32)
+        x, y, w = get_batch('train', batch_size=fit_params['batch_size'])
         logits = classifier(None, x)
         loss = F.cross_entropy(logits, y, reduction='none')
         loss = torch.mean(loss * w)
