@@ -4,6 +4,8 @@ import pandas as pd
 from tqdm import tqdm
 import torch
 from torch.nn import functional as F
+import wandb
+from scipy.special import softmax
 
 from .settings import settings
 from .utils import logger, AvocadoException
@@ -643,6 +645,9 @@ class NNClassifier(Classifier):
 
         object_weights = self.weighting_function(dataset, self.class_weights)
         object_classes = dataset.metadata["class"]
+        if self.class_map is not None:
+            object_classes = object_classes.map(self.class_map)
+
         classes = np.unique(object_classes)
 
         predictions = pd.DataFrame(
@@ -666,10 +671,6 @@ class NNClassifier(Classifier):
             validation_classes = object_classes[validation_mask]
             validation_weights = object_weights[validation_mask]
 
-            if self.class_map is not None:
-                train_classes = train_classes.map(self.class_map)
-                validation_classes = validation_classes.map(self.class_map)
-
             classifier = fit_nn_classifier(
                 train_features,
                 train_classes,
@@ -682,11 +683,13 @@ class NNClassifier(Classifier):
                 **kwargs
             )
 
-            # TODO: Need to loop over these
-            x = torch.nan_to_num(torch.tensor(validation_features.values[0:16], dtype=torch.float32)).to(self.device)
-            validation_predictions = classifier(None, x)
-
-            predictions[validation_mask] = validation_predictions.cpu().detach().numpy()
+            validation_predictions = []
+            for validation_feature in validation_features.values:
+                x = torch.nan_to_num(torch.tensor(validation_feature, dtype=torch.float32)).to(self.device)
+                logits = classifier(None, x.unsqueeze(0)).cpu().detach().numpy()
+                validation_predictions.append(softmax(logits[0], axis=-1))
+            validation_predictions = np.array(validation_predictions)
+            predictions[validation_mask] = validation_predictions
 
             classifiers.append(classifier)
 
@@ -727,6 +730,36 @@ class NNClassifier(Classifier):
         self.classifiers = classifiers
 
         return classifiers
+
+    def write(self, overwrite=False):
+        """Write a trained classifier to disk
+
+        Parameters
+        ----------
+        name : str
+            A unique name used to identify the classifier.
+        overwrite : bool (optional)
+            If a classifier with the same name already exists on disk and this
+            is True, overwrite it. Otherwise, raise an AvocadoException.
+        """
+
+        for i, classifier in enumerate(self.classifiers):
+            classifier_directory = settings["classifier_directory"]
+            path = os.path.join(classifier_directory, "classifier_%s.pt" % i)
+
+            # Make the containing directory if it doesn't exist yet.
+            directory = os.path.dirname(path)
+            os.makedirs(directory, exist_ok=True)
+
+            # Handle if the file already exists.
+            if os.path.exists(path):
+                if overwrite:
+                    logger.warning("Overwriting %s..." % path)
+                    os.remove(path)
+                else:
+                    raise AvocadoException("Dataset %s already exists! Can't write." % path)
+
+            torch.save(classifier.state_dict(), path)
 
     def predict(self, dataset):
         """Generate predictions for a dataset
@@ -803,13 +836,16 @@ def fit_nn_classifier(
         if split == 'train':
             data = train_features
             labels = train_classes
+            weights = train_weights
         elif split == 'val':
             data = validation_features
             labels = validation_classes
+            weights = validation_weights
         ix = np.random.randint(0, len(data), (batch_size,))
         x = torch.nan_to_num(torch.tensor(data.iloc[ix, :].values, dtype=torch.float32))
         y = torch.tensor(labels.iloc[ix], dtype=torch.long)
-        return x.to(device), y.to(device)
+        w = torch.tensor(weights.iloc[ix], dtype=torch.float32)
+        return x.to(device), y.to(device), w.to(device)
 
     net_params = {
         "categories": (),
@@ -825,7 +861,7 @@ def fit_nn_classifier(
 
     fit_params = {
         'log': False,
-        'max_iters': 1000,
+        'max_iters': 5000,
         'eval_iters': 100,
         'eval_interval': 100,
         'lr': 1e-4,
@@ -854,11 +890,13 @@ def fit_nn_classifier(
             correct = 0
             total = 0
             for k in range(eval_iters):
-                x, y = get_batch(split, batch_size=32)
+                x, y, w = get_batch(split, 32)
                 logits = classifier(None, x)
-                loss = F.cross_entropy(logits, y)
+                loss = F.cross_entropy(logits, y, reduction="none")
+                loss = torch.mean(loss * w)
                 losses[k] = loss.item()
-                correct += torch.sum(y == torch.argmax(logits, dim=-1))
+                # Workaround for https://github.com/pytorch/pytorch/issues/92311
+                correct += torch.sum(y == torch.max(logits, dim=-1).indices)
                 total += len(x)
             out['%s/loss' % split] = losses.mean()
             out['%s/accuracy' % split] = (correct / total).item()
@@ -874,9 +912,10 @@ def fit_nn_classifier(
         )
     for iter in range(fit_params['max_iters']):
         optimizer.zero_grad()
-        x, y = get_batch('train', batch_size=32)
+        x, y, w = get_batch('train', batch_size=32)
         logits = classifier(None, x)
-        loss = F.cross_entropy(logits, y)
+        loss = F.cross_entropy(logits, y, reduction='none')
+        loss = torch.mean(loss * w)
         loss.backward()
         optimizer.step()
         if iter % fit_params['eval_interval'] == 0 or iter == fit_params['max_iters'] - 1:
@@ -888,7 +927,6 @@ def fit_nn_classifier(
                 f"train accuracy {metrics['train/accuracy']:.4f}, val loss {metrics['val/loss']:.4f}, "
                 f"val accuracy {metrics['val/accuracy']:.4f}")
     return classifier
-
 
 
 def weighted_multi_logloss(
@@ -959,6 +997,8 @@ def weighted_multi_logloss(
             )
 
         class_predictions = predictions[class_name][class_mask]
+
+        class_predictions[class_predictions == 0] = 1e-10
 
         class_loglosses = (
             -class_weight
