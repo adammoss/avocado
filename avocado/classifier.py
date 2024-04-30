@@ -609,6 +609,7 @@ class NNClassifier(Classifier):
         batch_size=32,
         max_iters=10000,
         dim=16,
+        logger=None,
     ):
         super().__init__(name)
 
@@ -620,6 +621,7 @@ class NNClassifier(Classifier):
         self.batch_size = batch_size
         self.max_iters = max_iters
         self.dim = dim
+        self.logger = logger
 
         if torch.cuda.is_available():
             self.device = 'cuda'
@@ -690,6 +692,7 @@ class NNClassifier(Classifier):
                 fold=fold,
                 max_iters=self.max_iters,
                 dim=self.dim,
+                logger=self.logger,
                 **kwargs
             )
 
@@ -738,39 +741,14 @@ class NNClassifier(Classifier):
 
         self.train_predictions = predictions
         self.train_classes = object_classes
-        self.classifiers = classifiers
-
+        # Save the torch model path and config
+        self.classifiers = []
+        classifier_directory = settings["classifier_directory"]
+        for i, classifier in enumerate(classifiers):
+            model_path = os.path.join(classifier_directory, "classifier_%s_%s.pt" % (self.name, i))
+            torch.save(classifier.state_dict(), model_path)
+            self.classifiers.append({'model_path': model_path, 'config': classifier.config})
         return classifiers
-
-    def write(self, overwrite=False):
-        """Write a trained classifier to disk
-
-        Parameters
-        ----------
-        name : str
-            A unique name used to identify the classifier.
-        overwrite : bool (optional)
-            If a classifier with the same name already exists on disk and this
-            is True, overwrite it. Otherwise, raise an AvocadoException.
-        """
-
-        for i, classifier in enumerate(self.classifiers):
-            classifier_directory = settings["classifier_directory"]
-            path = os.path.join(classifier_directory, "classifier_%s.pt" % i)
-
-            # Make the containing directory if it doesn't exist yet.
-            directory = os.path.dirname(path)
-            os.makedirs(directory, exist_ok=True)
-
-            # Handle if the file already exists.
-            if os.path.exists(path):
-                if overwrite:
-                    logger.warning("Overwriting %s..." % path)
-                    os.remove(path)
-                else:
-                    raise AvocadoException("Dataset %s already exists! Can't write." % path)
-
-            torch.save(classifier.state_dict(), path)
 
     def predict(self, dataset):
         """Generate predictions for a dataset
@@ -789,10 +767,17 @@ class NNClassifier(Classifier):
 
         predictions = 0
 
-        for classifier in tqdm(self.classifiers, desc="Classifier", dynamic_ncols=True):
-            fold_scores = classifier.predict_proba(
-                features, raw_score=True, num_iteration=classifier.best_iteration_
-            )
+        for c in tqdm(self.classifiers, desc="Classifier", dynamic_ncols=True):
+            config = c['config']
+            if config['model'] == 'ft':
+                classifier = FTTransformer(**config).to(self.device)
+            elif config['model'] == 'mlp':
+                classifier = SimpleMLP(**config).to(self.device)
+            classifier.load_state_dict(torch.load(c['model_path']))
+            classifier.eval()
+            x = torch.nan_to_num(torch.tensor(features.values, dtype=torch.float32)).to(self.device)
+            logits = classifier(None, x).cpu().detach().numpy()
+            fold_scores = softmax(logits, axis=-1)
 
             exp_scores = np.exp(fold_scores)
 
@@ -820,6 +805,7 @@ def fit_nn_classifier(
     max_iters=10000,
     fold=1,
     dim=16,
+    logger=None,
     **kwargs
 ):
     """Fit a neural network classifier
@@ -869,13 +855,14 @@ def fit_nn_classifier(
         "dim_out": len(np.unique(train_classes)),
         "depth": 6,
         "heads": 8,
+        "dim_head": 16,
         "attn_dropout": 0.1,
         "ff_dropout": 0.1,
     }
     net_params.update(kwargs)
 
     fit_params = {
-        'log': True,
+        'logger': logger,
         'max_iters': max_iters,
         'eval_iters': 200,
         'eval_interval': 200,
@@ -921,7 +908,7 @@ def fit_nn_classifier(
 
     optimizer = torch.optim.AdamW(classifier.parameters(), lr=fit_params['lr'])
     classifier.train()
-    if fit_params['log']:
+    if fit_params['logger'] == 'wandb':
         run = wandb.init(
             project='avocado',
             config={**net_params},
@@ -938,7 +925,7 @@ def fit_nn_classifier(
         optimizer.step()
         if iter % fit_params['eval_interval'] == 0 or iter == fit_params['max_iters'] - 1:
             metrics = estimate_loss(fit_params['eval_iters'])
-            if fit_params['log']:
+            if fit_params['logger'] == 'wandb':
                 wandb.log(metrics)
             print(
                 f"step {iter}/{fit_params['max_iters']}: train loss {metrics['train/loss']:.4f}, "

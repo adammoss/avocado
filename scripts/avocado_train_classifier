@@ -62,6 +62,12 @@ if __name__ == "__main__":
         default=16,
         type=int,
     )
+    parser.add_argument(
+        "--logger",
+        type=str,
+        default=None,
+        choices=["wandb"],
+    )
 
     args = parser.parse_args()
 
@@ -146,6 +152,7 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             max_iters=args.max_iters,
             dim=args.dim,
+            logger=args.logger,
         )
 
     classifier.train(dataset)

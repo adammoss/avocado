@@ -136,6 +136,17 @@ class FTTransformer(nn.Module):
         assert all(map(lambda n: n > 0, categories)), 'number of each category must be positive'
         assert len(categories) + num_continuous > 0, 'input shape must not be null'
 
+        self.categories = categories
+        self.num_continuous = num_continuous
+        self.dim = dim
+        self.depth = depth
+        self.heads = heads
+        self.dim_head = dim_head
+        self.dim_out = dim_out
+        self.num_special_tokens = num_special_tokens
+        self.attn_dropout = attn_dropout
+        self.ff_dropout = ff_dropout
+
         # categories related calculations
 
         self.num_categories = len(categories)
@@ -143,7 +154,6 @@ class FTTransformer(nn.Module):
 
         # create category embeddings table
 
-        self.num_special_tokens = num_special_tokens
         total_tokens = self.num_unique_categories + num_special_tokens
 
         # for automatically offsetting unique category ids to the correct position in the categories embedding table
@@ -158,8 +168,6 @@ class FTTransformer(nn.Module):
             self.categorical_embeds = nn.Embedding(total_tokens, dim)
 
         # continuous
-
-        self.num_continuous = num_continuous
 
         if self.num_continuous > 0:
             self.numerical_embedder = NumericalEmbedder(dim, self.num_continuous)
@@ -186,6 +194,22 @@ class FTTransformer(nn.Module):
             nn.ReLU(),
             nn.Linear(dim, dim_out)
         )
+
+    @property
+    def config(self):
+        return {
+            'model': 'ft',
+            'categories': self.categories,
+            'num_continuous': self.num_continuous,
+            'dim': self.dim,
+            'depth': self.depth,
+            'heads': self.heads,
+            'dim_head': self.dim_head,
+            'dim_out': self.dim_out,
+            'num_special_tokens': self.num_special_tokens,
+            'self.attn_dropout': self.attn_dropout,
+            'ff_dropout': self.ff_dropout,
+        }
 
     def forward(self, x_categ, x_numer, return_attn=False):
         if self.num_categories > 0:
@@ -236,6 +260,8 @@ class FTTransformer(nn.Module):
 class SimpleMLP(nn.Module):
     def __init__(self, *, dim, dim_out, **kwargs):
         super(SimpleMLP, self).__init__()
+        self.dim = dim
+        self.dim_out = dim_out
         self.layers = nn.Sequential(
             nn.Linear(dim, 4 * dim),
             nn.ReLU(),
@@ -243,6 +269,14 @@ class SimpleMLP(nn.Module):
             nn.ReLU(),
             nn.Linear(dim, dim_out)
         )
+
+    @property
+    def config(self):
+        return {
+            'model': 'mlp',
+            'dim': self.dim,
+            'dim_out': self.dim_out
+        }
 
     def forward(self, x_categ, x_numer):
         return self.layers(x_numer)
