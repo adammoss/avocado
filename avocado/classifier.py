@@ -786,9 +786,14 @@ class NNClassifier(Classifier):
 
         predictions /= len(self.classifiers)
 
+        columns = self.train_predictions.columns
+        if self.class_map is not None:
+            columns = columns.map({v: k for k, v in self.class_map.items()})
         predictions = pd.DataFrame(
-            predictions, index=features.index, columns=self.train_predictions.columns
+            predictions, index=features.index, columns=columns
         )
+        cols = list(predictions.select_dtypes(include='float32'))
+        predictions = predictions[cols].astype('float64')
 
         return predictions
 
