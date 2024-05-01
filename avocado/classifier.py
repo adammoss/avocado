@@ -776,8 +776,7 @@ class NNClassifier(Classifier):
             classifier.load_state_dict(torch.load(c['model_path']))
             classifier.eval()
             x = torch.nan_to_num(torch.tensor(features.values, dtype=torch.float32)).to(self.device)
-            logits = classifier(None, x).cpu().detach().numpy()
-            fold_scores = softmax(logits, axis=-1)
+            fold_scores = classifier(None, x).cpu().detach().numpy()
 
             exp_scores = np.exp(fold_scores)
 
