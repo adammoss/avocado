@@ -59,6 +59,24 @@ if __name__ == "__main__":
     parser.add_argument(
         '--dim',
         help='Dim to use. (default: %(default)s)',
+        default=32,
+        type=int,
+    )
+    parser.add_argument(
+        '--depth',
+        help='Depth to use. (default: %(default)s)',
+        default=6,
+        type=int,
+    )
+    parser.add_argument(
+        '--heads',
+        help='Heads to use. (default: %(default)s)',
+        default=8,
+        type=int,
+    )
+    parser.add_argument(
+        '--dim_head',
+        help='Head dim to use. (default: %(default)s)',
         default=16,
         type=int,
     )
@@ -152,6 +170,9 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             max_iters=args.max_iters,
             dim=args.dim,
+            depth=args.depth,
+            heads=args.heads,
+            dim_head=args.dim_head,
             logger=args.logger,
         )
 

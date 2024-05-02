@@ -608,7 +608,10 @@ class NNClassifier(Classifier):
         model_type='mlp',
         batch_size=32,
         max_iters=10000,
-        dim=16,
+        dim=32,
+        depth=6,
+        heads=8,
+        dim_head=16,
         logger=None,
     ):
         super().__init__(name)
@@ -621,6 +624,9 @@ class NNClassifier(Classifier):
         self.batch_size = batch_size
         self.max_iters = max_iters
         self.dim = dim
+        self.depth = depth
+        self.heads = heads
+        self.dim_head = dim_head
         self.logger = logger
 
         if torch.cuda.is_available():
@@ -694,6 +700,9 @@ class NNClassifier(Classifier):
                 fold=fold,
                 max_iters=self.max_iters,
                 dim=self.dim,
+                depth=self.depth,
+                heads=self.heads,
+                dim_head=self.dim_head,
                 logger=self.logger,
                 save_model_path=os.path.join(classifier_directory, "classifier_%s_%s.pt" % (self.name, fold)),
                 **kwargs
@@ -809,7 +818,10 @@ def fit_nn_classifier(
     batch_size=32,
     max_iters=10000,
     fold=1,
-    dim=16,
+    dim=32,
+    depth=6,
+    heads=8,
+    dim_head=16,
     logger=None,
     save_model_path=None,
     **kwargs
@@ -859,9 +871,9 @@ def fit_nn_classifier(
         "num_continuous": train_features.shape[1],
         "dim": dim,
         "dim_out": len(np.unique(train_classes)),
-        "depth": 6,
-        "heads": 8,
-        "dim_head": 16,
+        "depth": depth,
+        "heads": heads,
+        "dim_head": dim_head,
         "attn_dropout": 0.1,
         "ff_dropout": 0.1,
     }
