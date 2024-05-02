@@ -657,7 +657,10 @@ class NNClassifier(Classifier):
         folds = dataset.label_folds(num_folds, random_state)
         num_folds = np.max(folds) + 1
 
-        object_weights = self.weighting_function(dataset, self.class_weights)
+        if self.weighting_function is not None:
+            object_weights = self.weighting_function(dataset, self.class_weights)
+        else:
+            object_weights = pd.Series(np.ones(len(dataset)), index=dataset.metadata.index)
         object_classes = dataset.metadata["class"]
         if self.class_map is not None:
             object_classes = object_classes.map(self.class_map)

@@ -36,7 +36,7 @@ if __name__ == "__main__":
         '--object_weighting',
         help='Kind of per-object weighting to use. (default: %(default)s)',
         default='flat',
-        choices=('flat', 'redshift'),
+        choices=('flat', 'redshift', 'none'),
     )
     parser.add_argument(
         '--simulate_plasticc_bias',
@@ -111,6 +111,8 @@ if __name__ == "__main__":
         weighting_function = avocado.evaluate_weights_flat
     elif args.object_weighting == 'redshift':
         weighting_function = avocado.evaluate_weights_redshift
+    elif args.object_weighting == 'none':
+        weighting_function = None
     else:
         raise avocado.AvocadoException("Invalid object weighting '%s'!" %
                                        args.weighting)
