@@ -664,6 +664,8 @@ class NNClassifier(Classifier):
             columns=classes,
         )
 
+        classifier_directory = settings["classifier_directory"]
+
         classifiers = []
 
         for fold in range(num_folds):
@@ -693,6 +695,7 @@ class NNClassifier(Classifier):
                 max_iters=self.max_iters,
                 dim=self.dim,
                 logger=self.logger,
+                save_model_path=os.path.join(classifier_directory, "classifier_%s_%s.pt" % (self.name, fold)),
                 **kwargs
             )
 
@@ -743,10 +746,8 @@ class NNClassifier(Classifier):
         self.train_classes = object_classes
         # Save the torch model path and config
         self.classifiers = []
-        classifier_directory = settings["classifier_directory"]
         for i, classifier in enumerate(classifiers):
             model_path = os.path.join(classifier_directory, "classifier_%s_%s.pt" % (self.name, i))
-            torch.save(classifier.state_dict(), model_path)
             self.classifiers.append({'model_path': model_path, 'config': classifier.config})
         return classifiers
 
@@ -810,6 +811,7 @@ def fit_nn_classifier(
     fold=1,
     dim=16,
     logger=None,
+    save_model_path=None,
     **kwargs
 ):
     """Fit a neural network classifier
@@ -919,6 +921,7 @@ def fit_nn_classifier(
             group='fold_%s' % fold,
             reinit=True,
         )
+    best_loss = np.inf
     for iter in range(fit_params['max_iters']):
         optimizer.zero_grad()
         x, y, w = get_batch('train', batch_size=fit_params['batch_size'])
@@ -929,12 +932,16 @@ def fit_nn_classifier(
         optimizer.step()
         if iter % fit_params['eval_interval'] == 0 or iter == fit_params['max_iters'] - 1:
             metrics = estimate_loss(fit_params['eval_iters'])
+            if metrics['val/loss'] < best_loss and save_model_path is not None:
+                best_loss = metrics['val/loss']
+                torch.save(classifier.state_dict(), save_model_path)
             if fit_params['logger'] == 'wandb':
                 wandb.log(metrics)
             print(
                 f"step {iter}/{fit_params['max_iters']}: train loss {metrics['train/loss']:.4f}, "
                 f"train accuracy {metrics['train/accuracy']:.4f}, val loss {metrics['val/loss']:.4f}, "
                 f"val accuracy {metrics['val/accuracy']:.4f}")
+
     return classifier
 
 
